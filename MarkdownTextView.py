@@ -14,11 +14,19 @@ class MarkdownTextView(ObjectWrapper):
 		self.create_accessory_toolbar()
 		self.delegate = self
 		self.to_add_to_beginning = ('', -1)
+		self.set_keyboard_dismiss_mode()
 		
 	# Temporary fix for a bug where setting selected_range throws a range error if placing caret at the end of the text
 	@on_main_thread
 	def set_selected_range(self, start, end):
 		ObjCInstance(self.__subject__).setSelectedRange_((start, (end-start)))
+		
+	@on_main_thread
+	def set_keyboard_dismiss_mode(self):
+		ObjCInstance(self.__subject__).keyboardDismissMode = 2
+		# 0 - normal
+		# 1 - on scroll
+		# 2 - on scroll interactive
 		
 	@on_main_thread
 	def create_accessory_toolbar(self):
@@ -161,7 +169,7 @@ class MarkdownTextView(ObjectWrapper):
 		link = '[' + value + '](awz-' + new_key + ')'
 		self.replace_range((start, end), link)
 		
-	def hide_keyboard(self, view, location):
+	def hide_keyboard(self, data):
 		self.end_editing()
 		
 	'''

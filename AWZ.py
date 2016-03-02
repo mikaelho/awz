@@ -15,6 +15,7 @@ from MarkdownWebView import MarkdownWebView
 from MarkdownTextView import MarkdownTextView
 from ItemDataSource import ItemDataSource
 from BlurView import BlurView
+import Synchronous
 
 
 class Model(ReminderStore):
@@ -24,8 +25,10 @@ class Model(ReminderStore):
 		self.link_regexp = re.compile(r'\[([^\]]*)\]\(awz-([^)]+)\)')
 		
 		if not 'state' in self:
-			self['state'] = json.dumps({ 'history': [ 'start' ]})
+			self['state'] = json.dumps({ 'history': [ [ 'start', 0 ] ], 'index': 0 })
 		self.state = json.loads(self['state'])
+		if not 'index' in self.state:
+			self.state['index'] = len(self.state['history'] - 1)
 		
 		start_up = [ 'start', 'help' ]	
 		for key in start_up:
@@ -35,6 +38,47 @@ class Model(ReminderStore):
 					with open(filename) as file_in:
 						init_string = file_in.read()
 						self[key] = init_string
+	
+	def push(self, key, caret_pos = 0):
+		#type = 'internal' if url else 'cross'
+		# Only add a new item if different from previous current 
+		if key <> self.state['history'][self.state['index']][0]:
+			new_index = self.state['index'] + 1
+			new_history = self.state['history'][:new_index]
+			#new_history.append({ 'type': type, 'key': key, 'url': url, 'caret_pos': caret_pos })
+			new_history.append([ key, caret_pos ])
+			self.state['history'] = new_history
+			self.state['index'] = new_index
+		else:
+			self.state['history'][self.state['index']] = [ key, caret_pos ]
+		self.save_state()
+		
+	def update_current_scroll(self, scroll_pos):
+		self.state['history'][self.state['index']][1] = scroll_pos
+		self.save_state()
+		
+	def save_state(self):
+		self['state'] = json.dumps(self.state)
+		
+	def can_move_back(self):
+		return self.state['index'] > 0
+		
+	def back(self):
+		if self.can_move_back():
+			self.state['index'] = self.state['index'] - 1
+			self.save_state()
+			return self.state['history'][self.state['index']]
+		return None
+			
+	def can_move_forward(self):
+		return self.state['index'] < (len(self.state['history']) - 1)
+		
+	def forward(self):
+		if self.can_move_forward():
+			self.state['index'] = self.state['index'] + 1
+			self.save_state()
+			return self.state['history'][self.state['index']]
+		return None
 		
 	def list_titles(self):
 		titles = []
@@ -65,9 +109,19 @@ class Model(ReminderStore):
 		soup = BeautifulSoup(html)
 		return soup.get_text()
 		
-	def history(self):
-		return copy.copy(self.state['history'])
+	def get_history_before_current(self):
+		current_index = self.state['index'] + 1
+		return copy.copy(self.state['history'][:current_index])
+		'''
+		keys = []
+		for index, item in enumerate(self.state['history']):
+			keys.append(item[0])
+			if index == current_index: break
+		return keys
+		'''
+		#return copy.copy(self.state['history'])
 		
+	'''
 	def open(self, key, at_index = -1):
 		history = self.state['history']
 		seen = set()
@@ -78,6 +132,31 @@ class Model(ReminderStore):
 		
 		self.state['history'].append(key)
 		self['state'] = json.dumps(self.state)
+	'''
+	
+	def populate_pipe(self):
+		history = self.get_history_before_current()
+		focus_index = len(history) - 1
+		open_item = history[focus_index]
+		messy_history = [item[0] for item in history]
+		messy_pipe = list(enumerate(messy_history + self.get_children(open_item[0])))
+		
+		# Remove duplicates within history, keeping the most recent, and always the focus item
+		seen = set()
+		seen_add = seen.add
+		seen.add(open_item[0]) # Always keep the focus item
+		pruned_pipe = [x for x in reversed(messy_pipe) if x[0] == focus_index or not (x[1] in seen or seen_add(x[1]))]
+		pruned_pipe.reverse()
+		
+		# Only show max 5 items of history
+		focus_pruned_index = 0
+		for index, item in enumerate(pruned_pipe):
+			if item[0] == focus_index:
+				focus_pruned_index = index
+				break
+		pruned_pipe = pruned_pipe[max(0, focus_pruned_index - 5):]
+		
+		return (pruned_pipe, focus_index, open_item[1])
 		
 	def get_children(self, key):
 		markd = self[key]
@@ -100,11 +179,6 @@ class Model(ReminderStore):
 			self[key] = markd
 		return children
 		
-	def back(self):
-		pass
-		
-	def forward(self):
-		pass
 
 color1 = '#fff7ee'
 color2 = '#6f4f2c'
@@ -130,8 +204,11 @@ class ViewController(ui.View):
 		self.web.tint_color = self.edit.text_color =  color2
 		self.button_area.background_color = color2
 		self.web.font = self.edit.font = ('PingFang HK', 14)
+		self.web.highlight_color = (1, 1, 1, 1)
 		
 		self.web.click_func = self.start_editing
+		self.web.double_click_func = self.change_focus
+		self.web.cross_link_func = self.cross_link
 		self.edit.changed_func = self.save_current
 		self.edit.end_edit_func = self.return_from_editing
 		self.edit.new_item_func = self.model.set_new
@@ -142,7 +219,7 @@ class ViewController(ui.View):
 		self.margins_on_content = (5, 15, 5, 15)
 		self.create_buttons(color1)
 		
-		self.navpanel = SlidePanel(active_edge_width = self.margins_on_content[1])
+		self.navpanel = SlidePanel(active_edge_width = self.margins_on_content[1], from_left = False)
 		self.add_subview(self.navpanel)
 		
 		self.list = ui.TableView()
@@ -151,7 +228,8 @@ class ViewController(ui.View):
 		self.list.tint_color = color1
 		self.list.data_source = ItemDataSource(self.create_panel_items())
 		self.list.data_source.action = self.tableview_did_select
-		self.list.data_source.accessory_action = self.tableview_accessory_action
+		self.list.data_source.link_func = self.insert_link
+		self.list.data_source.copy_func = self.insert_link_to_copy
 		self.list.data_source.background_color = 'transparent'
 		self.list.data_source.text_color = color1
 		self.list.data_source.highlight_color = color2
@@ -164,55 +242,92 @@ class ViewController(ui.View):
 		blur.frame = self.list.frame = (0, 0, panel_content.width, panel_content.height)
 		
 		self.navpanel.add_subview(panel_content)
-		# BlurView(style = 2)
 		
+		self.editing = False
 		self.open_current()
 		
-	def new_item(self, value = ''):
-		
+	def new_item(self, value = None):
+		value = value or '# '
 		new_key = self.model.new_item()
-		self.model[new_key] = '# '
+		self.model[new_key] = value
 		
 	def save_current(self, md):
-		self.model[self.editing_key] = md
+		self.model[self.pipe[self.editing_index][1]] = md
 		
-	def open_current(self, pos = 0):
-		history = self.model.history()
-		open_key = history[-1]
-		#mv = self.set_up_markdownview(open_key)
-		self.pipe = history + self.model.get_children(open_key)
-		self.active = open_key
-		self.show_html()
+	def open_current(self):
+		(self.pipe, focus_index, caret_pos) = self.model.populate_pipe()
+		contents = [ (item[0], self.model[item[1]]) for item in self.pipe ]
+		self.web.update_html(contents, focus_index, caret_pos)
 		
-	def show_html(self, current_key = None, caret_pos = 0):
+	def cross_link(self, key):
+		self.model.push(key)
+		self.open_current()
+		'''
+		(self.pipe, focus_index, caret_pos) = self.model.populate_pipe()
+		(md, total_caret_pos) = self.total_md(focus_index)
+		self.web.get_scroll_pos(md, total_caret_pos, result_callback = self.set_history_and_show)
+		'''
+	
+	'''	
+	def set_history_and_show_after_edit(self, md, scroll_pos):
+		new_scroll_pos = max(0, scroll_pos - self.web.height/2)
+		self.set_history_and_show(md, new_scroll_pos)
+		
+	def set_history_and_show(self, md, scroll_pos):
+		# Set history
+		self.model.update_current_scroll(scroll_pos)
+		# Show
+		self.web.update_html(md, scroll_pos)
+		self.edit.hidden = True
+	
+	def total_md(self, focus_index = None, current_caret_pos = 0):
+		total_caret_pos = current_caret_pos
 		self.start_positions = []
-		divider = '\n\n------------------------\n\n'
+		divider = '\n\n----------\n\n'
 		md = divider
-		for key in self.pipe:
+		for index, key in enumerate(self.pipe):
 			self.start_positions.append(len(md))
-			if key == current_key:
-				caret_pos += len(md)
+			if index == focus_index:
+				md += divider
+				total_caret_pos += len(md)
 			md += self.model[key]
 			md += divider
-		self.web.update_html(md, caret_pos)
-		self.edit.hidden = True
+			if index == focus_index:
+				md += divider
+		return (md, total_caret_pos)
+	'''
 		
-	def start_editing(self, caret_pos):
-		selected_index = 0
-		for index, start_pos in reversed(list(enumerate(self.start_positions))):
-			if caret_pos > start_pos:
-				selected_index = index
-				caret_pos -= start_pos
-				break
-		self.editing_key = self.pipe[selected_index]
-		self.edit.text = self.model[self.editing_key]
+	def change_focus(self, caret_pos):
+		(index, caret_pos) = self.caret_pos_to_index(caret_pos)
+		key = self.pipe[index]
+		self.cross_link(key)
+		
+	def start_editing(self, list_index, caret_pos):
+		self.editing_index = list_index
+		#(self.editing_index, caret_pos) = self.caret_pos_to_index(caret_pos)
+		self.edit.text = self.model[self.pipe[self.editing_index][1]]
 		self.edit.begin_editing()
 		self.edit.set_selected_range(caret_pos, caret_pos)
 		self.caret_pos = caret_pos
 		self.edit.hidden = False
+		self.editing = True
+		
+	def caret_pos_to_index(self, caret_pos):
+		selected_index = 0
+		rev = reversed(list(enumerate(self.start_positions)))
+		for index, start_pos in rev:
+			if caret_pos > start_pos:
+				selected_index = index
+				caret_pos -= start_pos
+				break
+		return (selected_index, caret_pos)
 		
 	def return_from_editing(self, caret_pos):
-		self.show_html(self.editing_key, caret_pos)
+		self.editing = False
+		self.model.push(self.pipe[self.editing_index][1], caret_pos)
+		self.open_current()
+		self.edit.hidden = True
+		#self.web.get_scroll_pos(md, total_caret_pos, result_callback = self.set_history_and_show_after_edit)	
 		
 	def create_panel_items(self):
 		items = []
@@ -220,7 +335,7 @@ class ViewController(ui.View):
 			if key == 'state': continue
 			items.append({
 					'title': self.model.get_title(key),
-					'accessory_type': 'detail_disclosure_button',
+					'accessory_type': 'disclosure_indicator',
 					'key': key
 				}
 			)
@@ -233,6 +348,7 @@ class ViewController(ui.View):
 	def create_buttons(self, color):
 		buttons = [
 			[ 'iob:navicon_32', self.show_list ],
+			[ 'iob:home_32', self.home ],
 			[ 'iob:chevron_left_24', self.back ],
 			[ 'iob:chevron_right_24', self.forward ],
 			[ 'iob:plus_round_24', self.add_new ]
@@ -243,19 +359,24 @@ class ViewController(ui.View):
 			button.action = spec[1]
 			button.tint_color = color
 			self.button_area.add_subview(button)
-			
+		
 	def show_list(self, sender):
 		self.navpanel.reveal()
-			
+		
+	def home(self, sender):
+		self.cross_link('start')
+	
 	def add_new(self, sender):
 		print self.main_scroll.height
 		print self.main_scroll.content_size
 		
 	def back(self, sender):
-		print 'back'
+		if self.model.back():
+			self.open_current()
 		
 	def forward(self, sender):
-		print 'fwd'
+		if self.model.forward():
+			self.open_current()
 		
 	def update_list(self):
 		pass
@@ -268,7 +389,7 @@ class ViewController(ui.View):
 		key = data['key']
 		title = data['title']
 		result = 0
-		if self.edit.hidden:
+		if not self.editing:
 			result = console.alert(title, '', 'Open')
 		else:
 			result = console.alert(title, '', 'Open', 'Link to copy', 'Insert link')
@@ -277,7 +398,20 @@ class ViewController(ui.View):
 			link = '[' + title + '](awz-' + key + ')'
 			self.edit.replace_range((start, end), link)
 			#self.edit.set_selected_range(start, start+len(link))
+			
+	def insert_link(self, key):
+		if self.editing:
+			self.navpanel.hide()
+			title = self.model.get_title(key)
+			(start, end) = self.edit.selected_range
+			link = '[' + title + '](awz-' + key + ')'
+			self.edit.replace_range((start, end), link)
+			self.edit.set_selected_range(start, start+len(link))
 		
+	def insert_link_to_copy(self, key):
+		if self.editing:
+			new_key = self.model.new_item(self.model[key])
+			self.insert_link(new_key)
 
 vc = ViewController()
 vc.background_color = '#91d4ff'
