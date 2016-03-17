@@ -2,15 +2,15 @@
 import ui
 from markdown2 import markdown
 from urllib import quote, unquote
-from proxy import ObjectWrapper
+#from proxy import ObjectWrapper
 from objc_util import *
 from Gestures import Gestures
+from extend import Extender
 
-
-class MarkdownTextView(ObjectWrapper):
-	
-	def __init__(self, obj):
-		ObjectWrapper.__init__(self, obj)
+class MarkdownTextView(Extender):
+#class MarkdownTextView(ObjectWrapper):
+		
+	def __init__(self):
 		self.create_accessory_toolbar()
 		self.delegate = self
 		self.to_add_to_beginning = ('', -1)
@@ -19,11 +19,11 @@ class MarkdownTextView(ObjectWrapper):
 	# Temporary fix for a bug where setting selected_range throws a range error if placing caret at the end of the text
 	@on_main_thread
 	def set_selected_range(self, start, end):
-		ObjCInstance(self.__subject__).setSelectedRange_((start, (end-start)))
+		ObjCInstance(self).setSelectedRange_((start, (end-start)))
 		
 	@on_main_thread
 	def set_keyboard_dismiss_mode(self):
-		ObjCInstance(self.__subject__).keyboardDismissMode = 2
+		ObjCInstance(self).keyboardDismissMode = 2
 		# 0 - normal
 		# 1 - on scroll
 		# 2 - on scroll interactive
@@ -49,6 +49,8 @@ class MarkdownTextView(ObjectWrapper):
 		keyboardToolbar.sizeToFit()
 		
 		Gestures().add_swipe(keyboardToolbar, self.hide_keyboard, Gestures.DOWN)
+		
+		Gestures().add_pan(keyboardToolbar, self.move_caret)
 		
 		button_width = 25
 		black = ObjCClass('UIColor').alloc().initWithWhite_alpha_(0.0, 1.0)
@@ -172,6 +174,23 @@ class MarkdownTextView(ObjectWrapper):
 	def hide_keyboard(self, data):
 		self.end_editing()
 		
+	def move_caret(self, data):
+		if data.velocity[1] > 500 and data.translation > 50:
+			self.end_editing()
+			return 
+		if data.state == Gestures.BEGAN:
+			self.translation_baseline = 0
+		dx = data.translation[0] - self.translation_baseline
+		if abs(dx) > 15:
+			self.translation_baseline = data.translation[0]
+			change = 1 if dx > 0 else -1
+			(start, end) = self.selected_range
+			new_start = start + change
+			(ns, ne) = (start, new_start) if dx > 0 else (new_start, start)
+			if ns > -1:
+				if not self.text[ns:ne] == '\n':
+					self.set_selected_range(new_start, new_start)
+		
 	'''
 	OBSOLETE: Use heading-ids or toc markdown extra instead
 	
@@ -248,7 +267,10 @@ class MarkdownTextView(ObjectWrapper):
 				# Check for prefixes
 				prefixes = [ '1. ', '+ ', '- ', '* ']
 				for prefix in prefixes:
-					if rest.startswith(prefix):
+					if rest.startswith(prefix + '\n'):
+						self.replace_range((pos + space_count, pos + space_count + len(prefix)), '')
+						break
+					elif rest.startswith(prefix):
 						next_line_prefix += prefix
 						break
 				if len(next_line_prefix) > 0:

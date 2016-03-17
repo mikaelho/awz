@@ -178,8 +178,8 @@ class Gestures():
 	def _pan_action(self, sender):
 		(data, action) = self._context(sender)
 		
-		trans = data.recognizer.translationInView_(ObjCInstance(view))
-		vel = data.recognizer.velocityInView_(ObjCInstance(view))		
+		trans = data.recognizer.translationInView_(ObjCInstance(data.view))
+		vel = data.recognizer.velocityInView_(ObjCInstance(data.view))		
 		data.translation = ui.Point(trans.x, trans.y)
 		data.velocity = ui.Point(vel.x, vel.y)
 		

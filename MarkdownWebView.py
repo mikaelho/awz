@@ -1,7 +1,7 @@
 # coding: utf-8
 import ui
 import json
-from time import sleep
+#from time import sleep
 from proxy import ObjectWrapper
 from objc_util import *
 from markdown2 import markdown
@@ -24,7 +24,7 @@ class MarkdownWebView(ObjectWrapper):
 		self.extras = []
 		self.click_func = None
 		
-		self.proxy_delegate = None
+		#self.proxy_delegate = None
 		
 		self.scroll_pos = None
 		self.font = ('Helvetica', 12)
@@ -33,7 +33,7 @@ class MarkdownWebView(ObjectWrapper):
 		self.alignment = None
 		self.margins = (10, 10, 10, 10)
 		
-		self.loading_fragment = False
+		#self.loading_fragment = False
 		
 		self.link_prefix = 'pythonista-markdownview:relay?content='
 		self.debug_prefix = 'pythonista-markdownview:debug?content='
@@ -41,20 +41,27 @@ class MarkdownWebView(ObjectWrapper):
 		self.scroll_prefix = 'pythonista-markdownview:scroll?content='
 		self.in_doc_prefix = None
 		
-		self.last_md = ''
+		self.last_contents = None
 		
 		# Web fragment is used to find the right scroll position when moving from editing to viewing
+		'''
 		self.web_fragment = ui.WebView(flex = 'WH')
 		self.web_fragment.hidden = True
 		self.web_fragment.delegate = self
 		self.add_subview(self.web_fragment)
+		'''
 		
-		# Main display webview
 		self.delegate = self
 		
-		Gestures().add_tap(self.__subject__, self.double_tap, number_of_touches_required = 2)
+		Gestures().add_long_press(self.__subject__, self.double_tap, number_of_touches_required = 2)
 		
 	def to_html(self, contents, highlight_index = None, caret_pos = 0, content_only = False):
+		return self.generate_html(contents, self.htmlIntro, highlight_index, caret_pos, content_only)
+		
+	def to_web_html(self, contents, highlight_index = None):
+		return self.generate_html(contents, self.web_intro, 0)
+		
+	def generate_html(self, contents, intro_template, highlight_index = None, caret_pos = 0, content_only = False):
 		result = ''
 		fragment = ''
 		scroll_pos = 0
@@ -68,10 +75,13 @@ class MarkdownWebView(ObjectWrapper):
 			result += '<div class = "item' + highlight_class + '" id="item-' + str(index) + '">\n'
 			result += markdown(md, extras=self.extras)
 			result += '\n</div>\n'
-		intro_template = self.htmlIntro if not content_only else self.fragmentIntro
-		intro = Template(intro_template.safe_substitute(css = self.css))
+		result = self.prepare_intro(intro_template, fragment, self.css) + result + self.htmlOutro
+		return result
+		
+	def prepare_intro(self, template, fragment = '', css = ''):
+		intro = Template(template.safe_substitute(css = css))
 		(font_name, font_size) = self.font
-		result = intro.safe_substitute(
+		return intro.safe_substitute(
 			background_color = self.to_css_rgba(self.background_color), 
 			text_color = self.to_css_rgba(self.tint_color),
 			highlight_color = self.to_css_rgba(self.highlight_color),
@@ -82,10 +92,7 @@ class MarkdownWebView(ObjectWrapper):
 			link_prefix = self.link_prefix,
 			debug_prefix = self.debug_prefix,
 			scroll_prefix = self.scroll_prefix,
-			fragment = fragment
-			#scroll_pos = scroll_pos
-		) + result + self.htmlOutro
-		return result
+			fragment = fragment)
 		
 	def to_css_rgba(self, color):
 		return 'rgba({:.0f},{:.0f},{:.0f},{})'.format(color[0]*255, color[1]*255, color[2]*255, color[3])
@@ -136,8 +143,8 @@ class MarkdownWebView(ObjectWrapper):
 		
 		#print  url
 		
-		if webview == self.web_fragment:
-			return True
+		#if webview == self.web_fragment:
+			#return True
 			
 		# HOUSEKEEPING
 		
@@ -179,7 +186,10 @@ class MarkdownWebView(ObjectWrapper):
 		
 		# Check for custom link handling
 		if url.startswith('/awz-'):
-			self.cross_link_func(url[5:])
+			(index, words) = json.loads(self.eval_js('link_location()'))
+			(source_list_index, caret_pos) = self.caret_pos_from_words(index, words)
+			target_key = url[5:]
+			self.cross_link_func(target_key, source_list_index, caret_pos)
 			return False
 		# Open 'http(s)' links in Safari
 		# 'file' in built-in browser
@@ -202,10 +212,11 @@ class MarkdownWebView(ObjectWrapper):
 		'''
 			
 	def double_tap(self, data):
-		call_str = 'focus_index(' + str(data.location.x) + ', ' + str(data.location.y) + ')'
-		index = self.eval_js(call_str)
-		if index > -1:
-			self.double_click_func(index)
+		if data.state == Gestures.BEGAN:
+			call_str = 'focus_index(' + str(data.location.x) + ', ' + str(data.location.y) + ')'
+			index = self.eval_js(call_str)
+			if index > -1:
+				self.double_click_func(index)
 			
 	def caret_pos_from_coords(self, coords):
 		words = self.eval_js('text_up_to_point(' + str(coords.x) + ', ' + str(coords.y) + ')')
@@ -256,18 +267,33 @@ class MarkdownWebView(ObjectWrapper):
 			
 			function anchor_click() {
 				var e = window.event;
+				window.awzX = e.clientX;
+				window.awzY = e.clientY;
 				e.stopPropagation();
 				return false;
 			}
 			
 			function text_position() {
 				var e = window.event;
-				var t = text_up_to_point(e.currentTarget, e.clientX, e.clientY);
+				var data =  text_position_from_coords(e.currentTarget, e.clientX, e.clientY);
+				
 				var r = document.getElementById("relay");
-				var data = JSON.stringify([ parseInt(e.currentTarget.id.substring(5)), t ]);
-					
 				r.href="$link_prefix"+encodeURIComponent(data);
 				r.click();
+			}
+			
+			function link_location() {
+				var x = window.awzX;
+				var y = window.awzY;
+				var elem = element_from_coords(x, y);
+				return text_position_from_coords(elem, x, y);
+			}
+				
+			function text_position_from_coords(elem, x, y) {
+				var t = text_up_to_point(elem, x, y);
+				var r = document.getElementById("relay");
+				var data = JSON.stringify([ parseInt(elem.id.substring(5)), t ]);
+				return data;
 			}
 			
 			function text_up_to_point(elem, x, y) {
@@ -281,13 +307,22 @@ class MarkdownWebView(ObjectWrapper):
 			}
 			
 			function focus_index(x, y) {
+				var elem = element_from_coords(x, y);
+				if (elem) {
+					return parseInt(elem.id.substring(5));
+				} else {
+					return -1;
+				}
+			}
+			
+			function element_from_coords(x, y) {
 				var elem = document.elementFromPoint(x, y);
 				for ( ; elem && elem !== document; elem = elem.parentNode ) {
 					if (elem.classList.contains("item")) {
-						return parseInt(elem.id.substring(5));
+						return elem;
 					}
 				}
-				return -1;
+				return null;
 			}
 			
 			function initialize() {
@@ -328,18 +363,19 @@ class MarkdownWebView(ObjectWrapper):
 				<div id="fragment" style="visibility:hidden;position:absolute;">$fragment</div>
 	''')
 	
-	fragmentIntro = Template('''
+	web_intro = Template('''
 		<html>
 		<head>
 		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+		<title>The System</title>
 		<style>
 			$css
 		</style>
 		</head>
 		<body>
 			<div id="content">
-	'''
-	)
+	''')
+	
 	htmlOutro = '''
 			</div>
 		</body>
@@ -348,7 +384,7 @@ class MarkdownWebView(ObjectWrapper):
 	default_css = '''
 		* {
 			font-size: $font_size;
-			font-family: $font_family;
+			font-family: "$font_family";
 			color: $text_color;
 			text-align: $text_align;
 			-webkit-text-size-adjust: none;

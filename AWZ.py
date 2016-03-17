@@ -1,12 +1,15 @@
 # coding: utf-8
 import ui
 import console
+import clipboard
 import json
 import copy
 import re
 import os
 from markdown2 import markdown
 from bs4 import BeautifulSoup
+
+#from extend import extend
 
 from SlidePanel import SlidePanel
 from ReminderStore import ReminderStore
@@ -15,7 +18,8 @@ from MarkdownWebView import MarkdownWebView
 from MarkdownTextView import MarkdownTextView
 from ItemDataSource import ItemDataSource
 from BlurView import BlurView
-import Synchronous
+from extend import Extender
+import Server
 
 
 class Model(ReminderStore):
@@ -194,7 +198,7 @@ class ViewController(ui.View):
 		self.web = MarkdownWebView(ui.WebView(flex = 'WH'))
 		self.edit = MarkdownTextView(ui.TextView(flex = 'WH'))
 		self.web.frame = (0, 0, self.width, self.height - self.button_area_height)
-		self.edit.frame = (0, 0, self.width, self.height)
+		self.edit.frame = self.bounds
 		self.edit.hidden = True
 
 		self.button_area = EvenView(margin = 20)
@@ -207,14 +211,14 @@ class ViewController(ui.View):
 		self.web.highlight_color = (1, 1, 1, 1)
 		
 		self.web.click_func = self.start_editing
-		self.web.double_click_func = self.change_focus
+		self.web.double_click_func = self.popup
 		self.web.cross_link_func = self.cross_link
 		self.edit.changed_func = self.save_current
 		self.edit.end_edit_func = self.return_from_editing
 		self.edit.new_item_func = self.model.set_new
 		
 		self.add_subview(self.web.__subject__)
-		self.add_subview(self.edit.__subject__)
+		self.add_subview(self.edit)
 		self.add_subview(self.button_area)
 		self.margins_on_content = (5, 15, 5, 15)
 		self.create_buttons(color1)
@@ -243,6 +247,24 @@ class ViewController(ui.View):
 		
 		self.navpanel.add_subview(panel_content)
 		
+		self.popup_view = ui.Button(flex = 'WH')
+		self.popup_view.action = self.hide
+		self.popup_view.frame = self.bounds
+		self.popup_view.background_color = 'transparent'
+		self.popup_view.hidden = True
+		self.add_subview(self.popup_view)
+		popup_button_blur = BlurView(style = 2, flex = 'LRTB')
+		popup_button_blur.frame = (0,0,200,50)
+		popup_button_blur.center = self.center
+		self.popup_view.add_subview(popup_button_blur)
+		popup_button_area = EvenView(margin = 20)
+		popup_button_blur.add_subview(popup_button_area)
+		popup_button_area.flex = 'WH'
+		popup_button_area.frame = popup_button_blur.bounds
+		popup_button_area.add_subview(ActionButton(ui.Button(), 'iob:link_32', self.copy_internal_link))
+		popup_button_area.add_subview(ActionButton(ui.Button(), 'iob:ios7_world_outline_32', self.copy_external_link))
+		popup_button_area.add_subview(ActionButton(ui.Button(), 'iob:arrow_shrink_32', self.change_focus))
+		
 		self.editing = False
 		self.open_current()
 		
@@ -259,8 +281,11 @@ class ViewController(ui.View):
 		contents = [ (item[0], self.model[item[1]]) for item in self.pipe ]
 		self.web.update_html(contents, focus_index, caret_pos)
 		
-	def cross_link(self, key):
-		self.model.push(key)
+	def cross_link(self, target_key, source_list_index = None, source_position = None):
+		if source_list_index:
+			source_key = self.pipe[source_list_index][1]
+			self.model.push(source_key, source_position)
+		self.model.push(target_key)
 		self.open_current()
 		'''
 		(self.pipe, focus_index, caret_pos) = self.model.populate_pipe()
@@ -297,10 +322,29 @@ class ViewController(ui.View):
 		return (md, total_caret_pos)
 	'''
 		
-	def change_focus(self, caret_pos):
-		(index, caret_pos) = self.caret_pos_to_index(caret_pos)
-		key = self.pipe[index]
-		self.cross_link(key)
+	def popup(self, index):
+		index = int(index)
+		self.long_press_key = [item[1] for item in self.pipe if item[0] == index][0]
+		
+		self.popup_view.hidden = False
+		
+	def change_focus(self, sender):
+		#(index, caret_pos) = self.caret_pos_to_index(caret_pos)
+		self.popup_view.hidden = True
+		self.cross_link(self.long_press_key)
+		
+	def copy_internal_link(self, sender):
+		link_text = '[' + self.model.get_title(self.long_press_key) + '](awz-' + self.long_press_key + ')'
+		self.set_clipboard(link_text)
+		
+	def copy_external_link(self, sender):
+		link_text = self.model.get_title(self.long_press_key) + ' - http://joutsen.ddns.net/' + self.long_press_key
+		self.set_clipboard(link_text)
+		
+	def set_clipboard(self, text):
+		self.popup_view.hidden = True
+		clipboard.set(text)
+		console.hud_alert('Copied', duration=0.5)
 		
 	def start_editing(self, list_index, caret_pos):
 		self.editing_index = list_index
@@ -347,11 +391,12 @@ class ViewController(ui.View):
 		
 	def create_buttons(self, color):
 		buttons = [
-			[ 'iob:navicon_32', self.show_list ],
+			#[ 'iob:ios7_world_outline_24', self.toggle_server ],
 			[ 'iob:home_32', self.home ],
 			[ 'iob:chevron_left_24', self.back ],
 			[ 'iob:chevron_right_24', self.forward ],
-			[ 'iob:plus_round_24', self.add_new ]
+			[ 'iob:navicon_32', self.show_list ]
+			#[ 'iob:plus_round_24', self.add_new ]
 		]
 		# iob:ios7_compose_outline_32
 		for spec in buttons:
@@ -366,9 +411,19 @@ class ViewController(ui.View):
 	def home(self, sender):
 		self.cross_link('start')
 	
+	'''
 	def add_new(self, sender):
 		print self.main_scroll.height
 		print self.main_scroll.content_size
+	'''
+	
+	def toggle_server(self, sender):
+		if Server.alive():
+			Server.stop()
+			sender.tint_color = color1
+		else:
+			Server.start(self.content_for_web)
+			sender.tint_color = 'green'
 		
 	def back(self, sender):
 		if self.model.back():
@@ -412,6 +467,24 @@ class ViewController(ui.View):
 		if self.editing:
 			new_key = self.model.new_item(self.model[key])
 			self.insert_link(new_key)
+
+	def content_for_web(self, key):
+		# Strip 'awz-'
+		key = key[4:]
+		keys = [ key ] + self.model.get_children(key)
+		contents = [(index, self.model[content_key]) for index, content_key in enumerate(keys)]
+		return self.web.to_web_html(contents)
+
+	def hide(self, sender):
+		sender.hidden = True
+
+class ActionButton(Extender):
+	def __init__(self, image_name, handler_func):
+		self.image = ui.Image.named(image_name)
+		self.action = handler_func
+		self.tint_color = color1
+		self.background_color = 'transparent'
+		self.size_to_fit()
 
 vc = ViewController()
 vc.background_color = '#91d4ff'
